@@ -1,0 +1,140 @@
+# Post the gate result as a pull request comment, including on pull requests
+# from forks.
+#
+# This file exists because of a specific, common and serious vulnerability.
+#
+# A `pull_request` workflow triggered by a fork gets a read-only token and no
+# secrets, so it cannot post a comment. The obvious fix is to switch the
+# trigger to `pull_request_target`, which runs with a write token and full
+# access to secrets. The part that is easy to miss is that
+# `pull_request_target` runs the workflow *from the base branch* but, if you
+# check out the pull request head, executes *the attacker's code* with that
+# write token in the environment. Any build step, any postinstall hook, any
+# Makefile is then running with permission to push to your repository and read
+# every secret it has. This is the "pwn request" pattern, and it has been used
+# against real projects repeatedly.
+#
+# The safe structure is to split trust from privilege:
+#
+#   security.yml     triggered by pull_request. Runs the untrusted code.
+#                    Read-only token, no secrets. Writes the comment body to
+#                    an artifact and stops.
+#
+#   this file        triggered by workflow_run. Never checks out or executes
+#                    the pull request's code. Has write permission. Reads the
+#                    artifact as data and posts it.
+#
+# `workflow_run` always runs the version of this file on the default branch,
+# so a pull request cannot modify what runs here — which is exactly why the
+# privilege can safely live on this side.
+
+name: pr-comment
+
+on:
+  workflow_run:
+    workflows: [security]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  comment:
+    # A run triggered by anything other than a pull request has no comment to
+    # post.
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      actions: read
+    steps:
+      - name: Download the staged comment
+        id: download
+        uses: actions/download-artifact@v4
+        with:
+          name: gate-comment
+          path: comment
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+        continue-on-error: true
+
+      - name: Stop if there is nothing to post
+        if: steps.download.outcome != 'success'
+        run: |
+          echo "no gate-comment artifact; the security run probably failed early"
+          exit 0
+
+      # Everything in the artifact was produced by a job that ran attacker
+      # controlled code, so all of it is untrusted input. The pull request
+      # number matters most: left unchecked, a fork could write any number
+      # into that file and have this job post a comment on someone else's pull
+      # request, using this repository's identity. Checking it against the
+      # head SHA the triggering run actually reported is what closes that.
+      - name: Validate the artifact
+        id: validate
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          for f in comment/pr-number comment/head-sha comment/body.md; do
+            [[ -f "$f" ]] || { echo "missing $f"; exit 1; }
+          done
+
+          pr="$(tr -dc '0-9' < comment/pr-number)"
+          sha="$(tr -dc '0-9a-f' < comment/head-sha)"
+
+          [[ -n "$pr"  ]] || { echo "pull request number is not numeric"; exit 1; }
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "head sha is malformed"; exit 1; }
+
+          if [[ "$sha" != "$EXPECTED_SHA" ]]; then
+            echo "artifact head sha $sha does not match the triggering run ($EXPECTED_SHA)"
+            exit 1
+          fi
+
+          # And the pull request must genuinely be the one at that commit.
+          actual="$(gh api "repos/$REPO/pulls/$pr" --jq '.head.sha')"
+          if [[ "$actual" != "$sha" ]]; then
+            echo "pull request #$pr is at $actual, not $sha"
+            exit 1
+          fi
+
+          # Cap the body. GitHub rejects comments over 65536 characters, and a
+          # scanner having a bad day should not turn into a failing job here.
+          head -c 60000 comment/body.md > comment/body.trimmed.md
+          if [[ "$(wc -c < comment/body.md)" -gt 60000 ]]; then
+            printf '\n\n_Report truncated. Full results are in the job summary._\n' \
+              >> comment/body.trimmed.md
+          fi
+
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+
+      # One comment per pull request, updated in place. Appending a new comment
+      # on every push turns a busy pull request into forty near-identical
+      # walls of text, and reviewers start collapsing the whole thread.
+      - name: Post or update the comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.validate.outputs.pr }}
+          REPO: ${{ github.repository }}
+          MARKER: <!-- ci-baseline:gate -->
+        run: |
+          set -euo pipefail
+
+          # The marker goes in an HTML comment so it is invisible in the
+          # rendered comment but findable through the API.
+          { printf '%s\n' "$MARKER"; cat comment/body.trimmed.md; } > body.md
+
+          existing="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq "map(select(.body | startswith(\"$MARKER\"))) | .[0].id // empty")"
+
+          if [[ -n "$existing" ]]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$existing" \
+              -F body=@body.md >/dev/null
+            echo "updated comment $existing on #$PR"
+          else
+            gh api --method POST "repos/$REPO/issues/$PR/comments" \
+              -F body=@body.md >/dev/null
+            echo "created a comment on #$PR"
+          fi
