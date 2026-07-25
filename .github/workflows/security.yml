@@ -168,27 +168,47 @@ jobs:
           /tmp/gitleaks detect --no-git --report-format sarif \
             --report-path reports/gitleaks.sarif --exit-code 0
 
+      # Trivy is installed from its upstream release rather than through
+      # aquasecurity/trivy-action. Every other scanner here is installed the
+      # same way, and the marketplace action was the one inconsistency: it
+      # adds a third-party repository to the supply chain to wrap a single
+      # curl and one command line. docs/threat-model.md claims scanners come
+      # from upstream releases, and this is what makes that true.
+      - name: Install Trivy
+        if: startsWith(matrix.scanner, 'trivy-')
+        env:
+          TRIVY_VERSION: '0.58.1'
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            -o /tmp/trivy.tgz
+          tar -xzf /tmp/trivy.tgz -C /tmp trivy
+          /tmp/trivy --version
+
       - name: Trivy (filesystem)
         if: matrix.scanner == 'trivy-fs'
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: fs
-          scanners: vuln,misconfig,secret
-          format: sarif
-          output: reports/trivy.sarif
-          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
-          exit-code: '0'
+        run: |
+          set -euo pipefail
+          /tmp/trivy fs . \
+            --scanners vuln,misconfig,secret \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format sarif --output reports/trivy.sarif \
+            --exit-code 0
 
       - name: Trivy (image)
         if: matrix.scanner == 'trivy-image'
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: image
-          image-ref: ${{ inputs.image }}
-          format: sarif
-          output: reports/trivy-image.sarif
-          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
-          exit-code: '0'
+        env:
+          # Through the environment, not ${{ inputs.image }} inside the run
+          # block. The reference comes from a workflow input, so a caller can
+          # put anything in it; interpolation happens before the shell parses
+          # the line and would turn a quote and a semicolon into a command.
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          /tmp/trivy image "$IMAGE" \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format sarif --output reports/trivy-image.sarif \
+            --exit-code 0
 
       - name: Semgrep
         if: matrix.scanner == 'semgrep'
