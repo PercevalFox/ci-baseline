@@ -73,7 +73,7 @@ jobs:
       iac: ${{ steps.detect.outputs.iac }}
     steps:
       - name: Check out the caller
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The scanners only read the working tree; a token left on disk in
           # .git/config is a credential sitting in reach of every step that
@@ -81,7 +81,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out ci-baseline
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: PercevalFox/ci-baseline
           # The scripts must come from the same commit as the workflow that
@@ -156,7 +156,7 @@ jobs:
     # clean result.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -167,7 +167,7 @@ jobs:
       # only fails once a repository with workflows in it gets scanned.
       - name: Check out ci-baseline
         if: matrix.scanner == 'actionlint'
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: PercevalFox/ci-baseline
           ref: ${{ github.job_workflow_sha }}
@@ -293,7 +293,7 @@ jobs:
     outputs:
       passed: ${{ steps.gate.outcome == 'success' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
