@@ -84,6 +84,14 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: PercevalFox/ci-baseline
+          # The scripts must come from the same commit as the workflow that
+          # calls them. Without this the checkout lands on the default branch,
+          # so a consumer who carefully pins
+          #   uses: PercevalFox/ci-baseline/.github/workflows/security.yml@<sha>
+          # gets the workflow from that commit and the shell scripts it
+          # executes from whatever main happens to be — which is the exact
+          # mutable-reference problem this repository exists to argue against.
+          ref: ${{ github.job_workflow_sha }}
           path: .ci-baseline
           persist-credentials: false
 
@@ -150,6 +158,20 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
+
+      # Only the actionlint scanner needs ci-baseline's own scripts, and
+      # cloning a second repository for the other five is wasted time on every
+      # run. This was missing entirely at first: the actionlint step referenced
+      # .ci-baseline/scripts/ in a job that had never checked it out, which
+      # only fails once a repository with workflows in it gets scanned.
+      - name: Check out ci-baseline
+        if: matrix.scanner == 'actionlint'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: PercevalFox/ci-baseline
+          ref: ${{ github.job_workflow_sha }}
+          path: .ci-baseline
           persist-credentials: false
 
       - run: mkdir -p reports
@@ -237,6 +259,10 @@ jobs:
           # actionlint has no SARIF output; the SARIF conversion lives in
           # ci-baseline so the gate sees workflow problems alongside
           # everything else rather than in a separate job nobody opens.
+          # shellcheck disable=SC2016
+          # The braces below are a Go template consumed by actionlint, not
+          # shell expansion. Single quotes are exactly right and double quotes
+          # would break it, so shellcheck's advice is inverted here.
           "$(go env GOPATH)/bin/actionlint" -format \
             '{{range $err := .}}{{$err.Filepath}}:{{$err.Line}}:{{$err.Message}}{{"\n"}}{{end}}' \
             > /tmp/actionlint.txt || true

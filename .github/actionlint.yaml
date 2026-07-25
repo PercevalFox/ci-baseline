@@ -1,0 +1,10 @@
+# actionlint's context type table is generated from GitHub's documentation and
+# lags behind it. github.job_workflow_sha is a real property — "for jobs using
+# a reusable workflow, the commit SHA for the reusable workflow file" — and is
+# what makes a pinned reusable workflow also pin the scripts it executes.
+# Rewriting the workflow to satisfy an out-of-date linter would mean giving
+# that up, so the check is suppressed here instead, narrowly and with a reason.
+paths:
+  .github/workflows/**:
+    ignore:
+      - 'property "job_workflow_sha" is not defined'
