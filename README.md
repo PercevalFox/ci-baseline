@@ -1,3 +1,5 @@
+[ci](https://github.com/PercevalFox/ci-baseline/actions/workflows/ci.yml/badge.svg)
+
 # ci-baseline
 
 A reusable GitHub Actions security workflow that detects what a repository

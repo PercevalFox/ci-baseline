@@ -17,7 +17,7 @@ permissions: {}
 
 jobs:
   security:
-    uses: PercevalFox/ci-baseline/.github/workflows/security.yml@<commit-sha>
+    uses: PercevalFox/ci-baseline/.github/workflows/security.yml@1c1d2247feef6f4116de8fa03f6fa610347a0397
     permissions:
       contents: read
       security-events: write
