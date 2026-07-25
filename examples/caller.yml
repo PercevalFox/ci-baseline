@@ -1,0 +1,32 @@
+# Drop this in .github/workflows/security.yml in a repository that wants the
+# baseline. Nothing else is needed: the workflow detects the stack itself, and
+# it takes no secrets.
+
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, because a dependency that was clean on Monday is not necessarily
+    # clean on Friday and nobody opens a pull request just to find out.
+    - cron: '17 4 * * 1'
+
+permissions: {}
+
+jobs:
+  security:
+    uses: PercevalFox/ci-baseline/.github/workflows/security.yml@<commit-sha>
+    permissions:
+      contents: read
+      security-events: write
+    with:
+      policy: .sarif-gate.yml
+
+      # Set this to also scan a built image. Leave it out and only the source
+      # tree is scanned.
+      # image: ghcr.io/${{ github.repository }}:${{ github.sha }}
+
+      # Raise for a deep monorepo; the default of 6 covers services/<name>/.
+      # detect-depth: 8
