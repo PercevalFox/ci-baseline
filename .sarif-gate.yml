@@ -1,0 +1,22 @@
+version: 1
+
+fail_on: high
+warn_on: medium
+max_waiver_days: 90
+
+require_tools:
+  - gitleaks
+  - Trivy
+
+severity_overrides:
+  - match: { tool: gitleaks }
+    severity: critical
+    reason: a leaked credential is an incident whatever the rule's own level says
+
+  # This repository's fixtures contain deliberately unpinned workflows and
+  # fake references, which is the point of them.
+  - match: { path: "tests/*" }
+    severity: info
+    reason: test fixtures are intentionally broken
+
+waivers: []

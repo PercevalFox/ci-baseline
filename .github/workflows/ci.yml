@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: shellcheck
+        run: shellcheck -x scripts/*.sh scripts/lib/*.sh
+
+      - name: actionlint
+        run: |
+          set -euo pipefail
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint"
+
+      - name: Verify actions are pinned
+        # This repository holds other repositories to a pinning standard, so
+        # it has to meet it. Until `make bootstrap` has been run on a fork,
+        # this step is the thing that says so.
+        run: scripts/pin-actions.sh .github/workflows
+
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install bats
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats
+
+      - name: Run tests
+        run: bats tests/
+
+      - name: Check the SARIF converter on a known input
+        run: |
+          set -euo pipefail
+          printf 'a.yml:1:something wrong [expression]\n' > /tmp/in.txt
+          python3 scripts/actionlint-to-sarif.py /tmp/in.txt /tmp/out.sarif
+          python3 -c "import json,sys; json.load(open('/tmp/out.sarif'))"
+
+  # Dogfooding: this repository runs its own reusable workflow against itself.
+  # A security workflow that has never been called is a security workflow that
+  # does not work.
+  self:
+    needs: [lint, test]
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read
+      security-events: write
+    with:
+      policy: .sarif-gate.yml
