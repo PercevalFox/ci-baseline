@@ -1,0 +1,314 @@
+# Reusable security workflow.
+#
+# Call it from a repository with:
+#
+#   jobs:
+#     security:
+#       uses: PercevalFox/ci-baseline/.github/workflows/security.yml@<sha>
+#
+# It takes no secrets. That is deliberate and is the single most useful
+# property of this file: a reusable workflow that needs no secrets can be
+# called from a fork pull request without any of the usual danger, because
+# there is nothing in the job worth stealing.
+#
+# NOTE ON PINNING: this file ships with tag references. Run `make bootstrap`
+# once after forking to resolve them to commit SHAs; the pin check in ci.yml
+# fails until you do. See docs/pinning.md for why that check exists.
+
+name: security
+
+on:
+  workflow_call:
+    inputs:
+      policy:
+        description: Path to the sarif-gate policy file, relative to the caller's root.
+        type: string
+        default: .sarif-gate.yml
+      sarif-gate-version:
+        description: Release of sarif-gate to use.
+        type: string
+        default: v0.1.0
+      image:
+        description: Optional container image reference to scan in addition to the source.
+        type: string
+        default: ''
+      detect-depth:
+        description: How deep to look for stack markers. Raise for deep monorepos.
+        type: number
+        default: 6
+      upload-sarif:
+        description: Upload merged results to GitHub code scanning.
+        type: boolean
+        default: true
+      runs-on:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      passed:
+        description: Whether the gate passed.
+        value: ${{ jobs.gate.outputs.passed }}
+
+# No permissions at the top level, granted per job instead. The default when
+# this is omitted is whatever the repository setting says, which on older
+# organisations is still write-all. Stating it here means the workflow's
+# permissions do not depend on a setting in someone else's repository.
+permissions: {}
+
+# One security run per ref. Cancelling superseded runs matters more here than
+# on a build: scanners are slow, and five queued runs on a busy PR means the
+# feedback arrives after the review is over.
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    name: detect stack
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+    outputs:
+      scanners: ${{ steps.matrix.outputs.scanners }}
+      go: ${{ steps.detect.outputs.go }}
+      iac: ${{ steps.detect.outputs.iac }}
+    steps:
+      - name: Check out the caller
+        uses: actions/checkout@v4
+        with:
+          # The scanners only read the working tree; a token left on disk in
+          # .git/config is a credential sitting in reach of every step that
+          # follows, including third-party ones.
+          persist-credentials: false
+
+      - name: Check out ci-baseline
+        uses: actions/checkout@v4
+        with:
+          repository: PercevalFox/ci-baseline
+          path: .ci-baseline
+          persist-credentials: false
+
+      - name: Detect stack
+        id: detect
+        env:
+          DETECT_MAX_DEPTH: ${{ inputs.detect-depth }}
+        run: .ci-baseline/scripts/detect-stack.sh .
+
+      - name: Build scanner matrix
+        id: matrix
+        env:
+          # Values reach the script through the environment, never through
+          # ${{ }} interpolation inside the run block. Interpolation happens
+          # before the shell sees the script, so a value containing a quote
+          # and a semicolon becomes a command. These particular values are
+          # booleans from our own script, but the habit is the point: the same
+          # line with github.event.pull_request.title in it is remote code
+          # execution, and it is one of the most common findings in real
+          # workflow audits.
+          HAS_GO: ${{ steps.detect.outputs.go }}
+          HAS_PYTHON: ${{ steps.detect.outputs.python }}
+          HAS_NODE: ${{ steps.detect.outputs.node }}
+          HAS_IAC: ${{ steps.detect.outputs.iac }}
+          HAS_ACTIONS: ${{ steps.detect.outputs.actions }}
+          IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          scanners=()
+
+          # Always: a repository with no recognised stack is the one nobody
+          # has audited.
+          scanners+=(gitleaks trivy-fs)
+
+          if [[ "$HAS_GO" == "true" || "$HAS_PYTHON" == "true" || "$HAS_NODE" == "true" ]]; then
+            scanners+=(semgrep)
+          fi
+          [[ "$HAS_IAC" == "true" ]] && scanners+=(checkov)
+          [[ "$HAS_ACTIONS" == "true" ]] && scanners+=(actionlint)
+          [[ -n "$IMAGE" ]] && scanners+=(trivy-image)
+
+          printf -v json '"%s",' "${scanners[@]}"
+          printf 'scanners=[%s]\n' "${json%,}" >>"$GITHUB_OUTPUT"
+          printf 'selected: %s\n' "${scanners[*]}"
+
+  scan:
+    name: ${{ matrix.scanner }}
+    needs: detect
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        scanner: ${{ fromJSON(needs.detect.outputs.scanners) }}
+    # A scanner that fails must not stop the others, and must not fail the
+    # build here either. The gate job decides that, because it is the only
+    # place that knows whether a missing report is acceptable. This is exactly
+    # what sarif-gate's require_tools is for: a crashed scanner produces no
+    # SARIF, and no SARIF is caught as a missing tool rather than read as a
+    # clean result.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - run: mkdir -p reports
+
+      - name: Gitleaks
+        if: matrix.scanner == 'gitleaks'
+        run: |
+          set -euo pipefail
+          version=8.21.2
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz" \
+            -o /tmp/gitleaks.tgz
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          # --exit-code 0 because the gate decides, not the scanner. A scanner
+          # that exits non-zero on findings means the policy lives in two
+          # places and the copy in the workflow is the one nobody reviews.
+          /tmp/gitleaks detect --no-git --report-format sarif \
+            --report-path reports/gitleaks.sarif --exit-code 0
+
+      - name: Trivy (filesystem)
+        if: matrix.scanner == 'trivy-fs'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: vuln,misconfig,secret
+          format: sarif
+          output: reports/trivy.sarif
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: '0'
+
+      - name: Trivy (image)
+        if: matrix.scanner == 'trivy-image'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: ${{ inputs.image }}
+          format: sarif
+          output: reports/trivy-image.sarif
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: '0'
+
+      - name: Semgrep
+        if: matrix.scanner == 'semgrep'
+        run: |
+          set -euo pipefail
+          pip install --quiet 'semgrep==1.97.0'
+          semgrep scan --config p/default --config p/secrets \
+            --sarif --output reports/semgrep.sarif --metrics off .
+
+      - name: Checkov
+        if: matrix.scanner == 'checkov'
+        run: |
+          set -euo pipefail
+          pip install --quiet 'checkov==3.2.334'
+          # Checkov exits 1 on findings; the gate owns that decision.
+          checkov --directory . --output sarif --output-file-path reports \
+            --soft-fail --quiet
+          [[ -f reports/results_sarif.sarif ]] && \
+            mv reports/results_sarif.sarif reports/checkov.sarif
+
+      - name: actionlint
+        if: matrix.scanner == 'actionlint'
+        run: |
+          set -euo pipefail
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          # actionlint has no SARIF output; the SARIF conversion lives in
+          # ci-baseline so the gate sees workflow problems alongside
+          # everything else rather than in a separate job nobody opens.
+          "$(go env GOPATH)/bin/actionlint" -format \
+            '{{range $err := .}}{{$err.Filepath}}:{{$err.Line}}:{{$err.Message}}{{"\n"}}{{end}}' \
+            > /tmp/actionlint.txt || true
+          python3 .ci-baseline/scripts/actionlint-to-sarif.py \
+            /tmp/actionlint.txt reports/actionlint.sarif
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sarif-${{ matrix.scanner }}
+          path: reports/*.sarif
+          # A scanner that produced nothing should not fail the upload; its
+          # absence is the signal the gate acts on.
+          if-no-files-found: ignore
+          retention-days: 7
+
+  gate:
+    name: gate
+    needs: [detect, scan]
+    # always(), so a crashed scanner reaches the gate as a missing report
+    # rather than skipping the decision entirely.
+    if: always()
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      security-events: write
+    outputs:
+      passed: ${{ steps.gate.outcome == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sarif-*
+          merge-multiple: true
+          path: reports
+
+      - name: Install sarif-gate
+        env:
+          VERSION: ${{ inputs.sarif-gate-version }}
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/PercevalFox/sarif-gate/releases/download/${VERSION}/sarif-gate_linux_amd64.tar.gz" \
+            -o /tmp/sarif-gate.tgz
+          tar -xzf /tmp/sarif-gate.tgz -C /tmp sarif-gate
+          sudo install -m 0755 /tmp/sarif-gate /usr/local/bin/sarif-gate
+
+      - name: Evaluate
+        id: gate
+        env:
+          POLICY: ${{ inputs.policy }}
+        run: |
+          set -euo pipefail
+          args=(check --format markdown --out gate.md --sarif-out merged.sarif)
+          [[ -f "$POLICY" ]] && args+=(--policy "$POLICY")
+          sarif-gate "${args[@]}" 'reports/*.sarif'
+
+      - name: Job summary
+        if: always()
+        run: cat gate.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The comment body is uploaded rather than posted. Posting needs write
+      # access to pull requests, which a workflow triggered by a fork does not
+      # have and must not be given, because this job has already run the fork's
+      # code. pr-comment.yml picks the artifact up afterwards from a context
+      # that never touched it. See docs/fork-pull-requests.md.
+      - name: Stage the pull request comment
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          mkdir -p comment
+          cp gate.md comment/body.md
+          printf '%s\n' "${{ github.event.number }}" > comment/pr-number
+          printf '%s\n' "${{ github.event.pull_request.head.sha }}" > comment/head-sha
+
+      - name: Upload comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-comment
+          path: comment/
+          retention-days: 1
+
+      - name: Upload to code scanning
+        # always(), so a failing gate still publishes what it found. Uploading
+        # only on success hides precisely the runs worth looking at.
+        if: always() && inputs.upload-sarif && hashFiles('merged.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: merged.sarif
+          category: ci-baseline
