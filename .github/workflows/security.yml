@@ -73,7 +73,7 @@ jobs:
       iac: ${{ steps.detect.outputs.iac }}
     steps:
       - name: Check out the caller
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # The scanners only read the working tree; a token left on disk in
           # .git/config is a credential sitting in reach of every step that
@@ -81,7 +81,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out ci-baseline
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: PercevalFox/ci-baseline
           path: .ci-baseline
@@ -148,7 +148,7 @@ jobs:
     # clean result.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
@@ -225,7 +225,7 @@ jobs:
 
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sarif-${{ matrix.scanner }}
           path: reports/*.sarif
@@ -247,12 +247,12 @@ jobs:
     outputs:
       passed: ${{ steps.gate.outcome == 'success' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Download reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: sarif-*
           merge-multiple: true
@@ -298,7 +298,7 @@ jobs:
 
       - name: Upload comment
         if: always() && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gate-comment
           path: comment/
@@ -308,7 +308,7 @@ jobs:
         # always(), so a failing gate still publishes what it found. Uploading
         # only on success hides precisely the runs worth looking at.
         if: always() && inputs.upload-sarif && hashFiles('merged.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
         with:
           sarif_file: merged.sarif
           category: ci-baseline
